@@ -1,0 +1,430 @@
+rules_version = '2';
+
+service cloud.firestore {
+  match /databases/{database}/documents {
+    function signedIn() {
+      return request.auth != null;
+    }
+
+    function ownsRecord() {
+      return signedIn() && request.auth.uid == resource.data.userId;
+    }
+
+    function hasLegacyAdminProfile() {
+      let userPath = /databases/$(database)/documents/users/$(request.auth.uid);
+      return exists(userPath)
+             && !('accountStatus' in get(userPath).data)
+             && !('isVerified' in get(userPath).data);
+    }
+
+    function isCampusAdmin() {
+      return signedIn()
+             && (request.auth.token.admin == true
+                 || request.auth.token.role == 'admin')
+             && (
+               (isApprovedStudent()
+                && get(
+                  /databases/$(database)/documents/users/$(request.auth.uid)
+                ).data.role == 'admin')
+               || hasLegacyAdminProfile()
+             );
+    }
+
+    function isResponder() {
+      return signedIn()
+             && (isCampusAdmin() || isSecurityStaff());
+    }
+
+    function isSecurityStaff() {
+      return isApprovedStudent()
+             && get(
+               /databases/$(database)/documents/users/$(request.auth.uid)
+             ).data.get('role', '') == 'campus_security';
+    }
+
+    function isApprovedStudent() {
+      let userPath = /databases/$(database)/documents/users/$(request.auth.uid);
+      return signedIn()
+             && exists(userPath)
+             && get(userPath).data.accountStatus == 'active'
+             && get(userPath).data.isVerified == true;
+    }
+
+    function canReadIncident(data) {
+      return (signedIn() && data.userId == request.auth.uid)
+             || isCampusAdmin()
+             || (isResponder()
+                 && data.recipientTeams.hasAny(['campus_security']));
+    }
+
+    function validIncidentRouting(data) {
+      return (
+        data.reportType == 'sos'
+        && data.category == 'Emergency SOS'
+        && data.recipientTeams == ['campus_security']
+      ) || (
+        data.reportType == 'incident'
+        && data.category in [
+          'Medical Assistance', 'Fire Emergency', 'Harassment',
+          'Theft / Burglary', 'Suspicious Activity', 'Vandalism', 'Other'
+        ]
+        && data.recipientTeams == ['campus_security']
+      );
+    }
+
+    function canUpdateIncident() {
+      return isResponder()
+             && !isCampusAdmin()
+             && resource.data.recipientTeams.hasAny(['campus_security'])
+             && request.resource.data.userId == resource.data.userId
+             && request.resource.data.recipientTeams
+                == resource.data.recipientTeams
+             && request.resource.data.reportType == resource.data.reportType
+             && request.resource.data.category == resource.data.category
+             && request.resource.data.description == resource.data.description
+             && request.resource.data.location == resource.data.location
+             && request.resource.data.status in [
+               'pending', 'acknowledged', 'dispatched', 'resolved'
+             ]
+             && request.resource.data.updatedAt == request.time
+             && (
+               (
+                 resource.data.status == 'pending'
+                 && request.resource.data.status == 'acknowledged'
+                 && request.resource.data.diff(resource.data).affectedKeys().hasOnly([
+                   'status', 'acknowledgedBy', 'acknowledgedAt', 'updatedAt'
+                 ])
+                 && request.resource.data.acknowledgedBy == request.auth.uid
+                 && request.resource.data.acknowledgedAt == request.time
+               )
+               || (
+                 resource.data.status == 'acknowledged'
+                 && request.resource.data.status == 'dispatched'
+                 && request.resource.data.diff(resource.data).affectedKeys().hasOnly([
+                   'status', 'dispatchedBy', 'dispatchedAt', 'updatedAt'
+                 ])
+                 && request.resource.data.dispatchedBy == request.auth.uid
+                 && request.resource.data.dispatchedAt == request.time
+               )
+               || (
+                 resource.data.status in ['acknowledged', 'dispatched']
+                 && request.resource.data.status == 'resolved'
+                 && request.resource.data.diff(resource.data).affectedKeys().hasOnly([
+                   'status', 'resolvedBy', 'resolvedAt', 'updatedAt'
+                 ])
+                 && request.resource.data.resolvedBy == request.auth.uid
+                 && request.resource.data.resolvedAt == request.time
+               )
+             );
+    }
+
+    function validStudentNumber(data) {
+      return request.auth.token.email is string
+             && request.auth.token.email.matches(
+               '^[0-9]{9}@mywsu\\.ac\\.za$'
+             )
+             && data.email == request.auth.token.email
+             && data.studentNumber is string
+             && data.studentNumber.matches('^[0-9]{9}$')
+             && data.studentNumber
+                == request.auth.token.email.split('@')[0];
+    }
+
+    function canSelfActivateStudent() {
+      return request.auth.token.email_verified == true
+             && (
+               !('accountType' in resource.data)
+               || resource.data.accountType == 'student'
+             )
+             && resource.data.get('accountStatus', 'pending') == 'pending'
+             && resource.data.get('isVerified', false) == false
+             && request.resource.data.accountStatus == 'active'
+             && request.resource.data.isVerified == true
+             && request.resource.data.verifiedBy == 'email'
+             && request.resource.data.verifiedAt == request.time
+             && request.resource.data.updatedAt == request.time
+             && request.resource.data.diff(resource.data).affectedKeys()
+                .hasOnly([
+                  'accountStatus', 'isVerified', 'verifiedAt',
+                  'verifiedBy', 'updatedAt'
+                ])
+             && validStudentNumber(request.resource.data);
+    }
+
+    function canSelfVerifyStaff() {
+      return request.auth.token.email_verified == true
+             && resource.data.get('accountType', '') == 'staff_request'
+             && resource.data.get('accountStatus', 'pending') == 'pending'
+             && resource.data.get('isVerified', false) == false
+             && !('role' in resource.data)
+             && request.resource.data.isVerified == true
+             && request.resource.data.verifiedBy == 'email'
+             && request.resource.data.verifiedAt == request.time
+             && request.resource.data.updatedAt == request.time
+             && request.resource.data.diff(resource.data).affectedKeys()
+                .hasOnly(['isVerified', 'verifiedAt', 'verifiedBy', 'updatedAt']);
+    }
+
+    function canAdminApproveStaff() {
+      return isCampusAdmin()
+             && request.auth.uid != resource.data.uid
+             && resource.data.get('accountType', '') == 'staff_request'
+             && resource.data.get('accountStatus', 'pending') == 'pending'
+             && resource.data.get('isVerified', false) == true
+             && !('role' in resource.data)
+             && request.resource.data.accountStatus == 'active'
+             && request.resource.data.role == 'campus_security'
+             && request.resource.data.approvedBy == request.auth.uid
+             && request.resource.data.approvedAt == request.time
+             && request.resource.data.updatedAt == request.time
+             && request.resource.data.diff(resource.data).affectedKeys()
+                .hasOnly([
+                  'accountStatus', 'role', 'approvedBy', 'approvedAt',
+                  'updatedAt'
+                ]);
+    }
+
+    function canSelfReactivateStudent() {
+      return request.auth.token.email_verified == true
+             && (
+               !('accountType' in resource.data)
+               || resource.data.accountType == 'student'
+             )
+             && resource.data.accountStatus == 'inactive'
+             && resource.data.isVerified == true
+             && request.resource.data.accountStatus == 'active'
+             && request.resource.data.updatedAt == request.time
+             && request.resource.data.diff(resource.data).affectedKeys()
+                .hasOnly(['accountStatus', 'updatedAt']);
+    }
+
+    function ownsStaffNumber(data) {
+      return data.staffNumber is string
+             && data.staffNumber.matches('^[0-9]{9}$')
+             && (
+               (request.method == 'update'
+                && resource.data.get('staffNumber', '') == data.staffNumber)
+               || get(
+                 /databases/$(database)/documents/staff_numbers/$(data.staffNumber)
+               ).data.uid == request.auth.uid
+             );
+    }
+
+    function validAccountIdentity(data) {
+      return (
+        ('accountType' in data
+         && data.accountType == 'staff_request'
+         && request.auth.token.email is string
+         && data.email == request.auth.token.email
+         && ownsStaffNumber(data))
+        || (
+          'accountType' in data
+          && data.accountType == 'manager_request'
+          && request.auth.token.email is string
+          && data.email == request.auth.token.email
+          && ownsStaffNumber(data)
+        )
+        || validStudentNumber(data)
+      );
+    }
+
+    match /staff_numbers/{staffNumber} {
+      allow create: if signedIn()
+                    && staffNumber.matches('^[0-9]{9}$')
+                    && request.resource.data.keys().hasOnly(['uid', 'createdAt'])
+                    && request.resource.data.uid == request.auth.uid
+                    && request.resource.data.createdAt == request.time;
+      allow read: if isCampusAdmin();
+      allow update, delete: if false;
+    }
+
+    match /users/{userId} {
+      allow create: if signedIn()
+                    && request.auth.uid == userId
+                    && request.resource.data.uid == userId
+                    && request.resource.data.accountStatus == 'pending'
+                    && request.resource.data.isVerified == false
+                    && !('role' in request.resource.data)
+                    && validAccountIdentity(request.resource.data);
+      allow read: if (signedIn() && request.auth.uid == userId)
+                  || isCampusAdmin();
+      allow update: if signedIn()
+                    && (
+                      (
+                        request.auth.uid == userId
+                        && (
+                          canSelfActivateStudent()
+                          || canSelfVerifyStaff()
+                          || canSelfReactivateStudent()
+                          || (
+                            !request.resource.data.diff(resource.data)
+                              .affectedKeys().hasAny([
+                                'accountStatus', 'isVerified', 'role',
+                                  'verifiedAt', 'verifiedBy', 'accountType',
+                                  'staffNumber'
+                              ])
+                            && validAccountIdentity(request.resource.data)
+                          )
+                        )
+                      )
+                      || canAdminApproveStaff()
+                      || (
+                        isCampusAdmin()
+                        && request.auth.uid != userId
+                        && resource.data.isVerified == true
+                        && resource.data.accountStatus in [
+                          'active', 'suspended', 'inactive'
+                        ]
+                        && (!('role' in resource.data)
+                            || resource.data.role != 'admin')
+                        && request.resource.data.accountStatus in [
+                          'active', 'suspended', 'inactive'
+                        ]
+                        && request.resource.data.accountStatus
+                           != resource.data.accountStatus
+                        && request.resource.data.updatedAt == request.time
+                        && request.resource.data.diff(resource.data)
+                           .affectedKeys().hasOnly([
+                             'accountStatus', 'updatedAt'
+                           ])
+                      )
+                    );
+      allow delete: if false;
+    }
+
+    match /emergency_alerts/{alertId} {
+      allow create: if signedIn()
+                    && isApprovedStudent()
+                    && request.resource.data.userId == request.auth.uid
+                    && request.resource.data.keys().hasAll([
+                      'userId', 'userEmail', 'latitude', 'longitude',
+                      'status', 'createdAt'
+                    ])
+                    && request.resource.data.latitude is number
+                    && request.resource.data.latitude >= -90
+                    && request.resource.data.latitude <= 90
+                    && request.resource.data.longitude is number
+                    && request.resource.data.longitude >= -180
+                    && request.resource.data.longitude <= 180
+                    && request.resource.data.status == 'open';
+      allow read: if ownsRecord() || isCampusAdmin();
+      allow update, delete: if false;
+    }
+
+    match /incident_reports/{reportId} {
+      allow create: if signedIn()
+                    && isApprovedStudent()
+                    && request.resource.data.userId == request.auth.uid
+                    && request.resource.data.keys().hasAll([
+                      'userId', 'userEmail', 'category', 'location',
+                      'description', 'status', 'createdAt'
+                    ])
+                    && request.resource.data.category is string
+                    && request.resource.data.location is string
+                    && request.resource.data.description is string
+                    && request.resource.data.status == 'open';
+      allow read: if ownsRecord() || isCampusAdmin();
+      allow update, delete: if false;
+    }
+
+    match /incidents/{incidentId} {
+      allow create: if signedIn()
+                    && isApprovedStudent()
+                    && request.resource.data.keys().hasAll([
+                      'userId', 'userEmail', 'studentNumber', 'studentName',
+                      'studentPhone', 'campus', 'residenceBlock', 'room',
+                      'emergencyContacts', 'reportType', 'category',
+                      'description', 'location', 'recipientTeams',
+                      'status', 'createdAt', 'updatedAt'
+                    ])
+                    && request.resource.data.keys().hasOnly([
+                      'userId', 'userEmail', 'studentNumber', 'studentName',
+                      'studentPhone', 'campus', 'residenceBlock', 'room',
+                      'emergencyContacts', 'reportType', 'category',
+                      'description', 'location', 'latitude', 'longitude',
+                      'recipientTeams', 'status', 'createdAt', 'updatedAt'
+                    ])
+                    && request.resource.data.userId == request.auth.uid
+                    && request.resource.data.userEmail == request.auth.token.email
+                    && request.resource.data.studentNumber.matches(
+                      '^[0-9]{9}$'
+                    )
+                    && request.resource.data.studentNumber
+                       == request.auth.token.email.split('@')[0]
+                    && request.resource.data.reportType in ['sos', 'incident']
+                    && request.resource.data.category is string
+                    && request.resource.data.description is string
+                    && request.resource.data.location is string
+                    && request.resource.data.recipientTeams is list
+                    && validIncidentRouting(request.resource.data)
+                    && request.resource.data.status == 'pending'
+                    && request.resource.data.createdAt == request.time
+                    && request.resource.data.updatedAt == request.time
+                    && (
+                      !('latitude' in request.resource.data.keys())
+                      || (
+                        request.resource.data.latitude is number
+                        && request.resource.data.latitude >= -90
+                        && request.resource.data.latitude <= 90
+                        && request.resource.data.longitude is number
+                        && request.resource.data.longitude >= -180
+                        && request.resource.data.longitude <= 180
+                      )
+                    );
+      allow read: if canReadIncident(resource.data);
+      allow update: if canUpdateIncident();
+      allow delete: if false;
+    }
+
+    match /staff_tokens/{userId}/devices/{deviceId} {
+      function validStaffTokenWrite() {
+        return signedIn()
+               && request.auth.uid == userId
+               && (
+                 (isSecurityStaff()
+                  && request.resource.data.role == 'campus_security')
+                 || (isCampusAdmin()
+                     && request.resource.data.role == 'admin')
+               )
+               && request.resource.data.uid == userId
+               && request.resource.data.fcmToken == deviceId
+               && request.resource.data.fcmToken is string
+               && request.resource.data.fcmToken.size() <= 4096
+               && request.resource.data.updatedAt == request.time
+               && request.resource.data.keys().hasOnly([
+                 'uid', 'role', 'fcmToken', 'updatedAt'
+               ]);
+      }
+
+      allow create, update: if validStaffTokenWrite();
+      allow delete: if signedIn() && request.auth.uid == userId;
+      allow read: if false;
+    }
+
+    match /user_tokens/{userId}/devices/{deviceId} {
+      allow create, update: if signedIn()
+                            && request.auth.uid == userId
+                            && isApprovedStudent()
+                            && request.resource.data.uid == userId
+                            && request.resource.data.fcmToken == deviceId
+                            && request.resource.data.fcmToken is string
+                            && request.resource.data.fcmToken.size() <= 4096
+                            && request.resource.data.updatedAt == request.time
+                            && request.resource.data.keys().hasOnly([
+                              'uid', 'fcmToken', 'updatedAt'
+                            ]);
+      allow delete: if signedIn() && request.auth.uid == userId;
+      allow read: if false;
+    }
+
+    match /campus_map_markers/{markerId} {
+      allow read: if signedIn();
+      allow create, update, delete: if isCampusAdmin();
+    }
+
+    match /campus_settings/{settingId} {
+      allow read: if signedIn();
+      allow write: if isCampusAdmin();
+    }
+  }
+}

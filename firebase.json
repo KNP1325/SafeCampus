@@ -1,0 +1,29 @@
+{
+  "functions": {
+    "source": "functions",
+    "runtime": "nodejs22"
+  },
+  "firestore": {
+    "rules": "firestore.rules"
+  },
+  "flutter": {
+    "platforms": {
+      "android": {
+        "default": {
+          "projectId": "safecampus-1f0a3",
+          "appId": "1:775855370532:android:250b3700633f335fa4c3b1",
+          "fileOutput": "android/app/google-services.json"
+        }
+      },
+      "dart": {
+        "lib/firebase_options.dart": {
+          "projectId": "safecampus-1f0a3",
+          "configurations": {
+            "android": "1:775855370532:android:250b3700633f335fa4c3b1",
+            "web": "1:775855370532:web:99beab4ed36f3eb1a4c3b1"
+          }
+        }
+      }
+    }
+  }
+}
