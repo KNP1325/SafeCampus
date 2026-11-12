@@ -27,6 +27,24 @@ repository. Before running the app:
 Do not commit Firebase service-account keys, signing keys, or other private
 credentials.
 
+## Publish the web app
+
+The GitHub Actions workflow builds the web app using the Firebase options
+provided as a repository secret. In the GitHub repository settings:
+
+1. Add an Actions secret named `FIREBASE_OPTIONS_DART` containing the contents
+   of your locally generated `lib/firebase_options.dart`.
+2. Under **Settings → Pages**, set the build and deployment source to
+   **GitHub Actions**.
+3. In Firebase Authentication, add `knp1325.github.io` to the authorized
+   domains for the web app.
+4. Push to `main` or run the **Deploy SafeCampus web app** workflow manually.
+
+After a successful deployment, the app will be available at
+`https://knp1325.github.io/SafeCampus/`. Firebase web options are client-side
+configuration and will be included in the published web bundle; never use a
+service-account key or other private credential for this setting.
+
 ## Run the application
 
 From the project directory:
